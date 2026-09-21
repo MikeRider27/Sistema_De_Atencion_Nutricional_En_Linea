@@ -1,0 +1,88 @@
+name: sanl
+
+x-db-healthcheck: &db-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  interval: 5s
+  timeout: 3s
+  retries: 10
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sanl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env (ejecuta ./setup.sh)}
+      POSTGRES_DB: ${POSTGRES_DB:-sanl}
+      TZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    healthcheck: *db-healthcheck
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sanl}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sanl}
+      JWT_SECRET: ${JWT_SECRET:?Falta JWT_SECRET en .env (ejecuta ./setup.sh)}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+      CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-3100}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Mexico_City}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-Demo1234!}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8100}:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_INTERNAL_URL: http://backend:8000
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3100}:3000"
+
+  # --- Pruebas: `docker compose --profile test run --rm --build tests` (BD efímera, no toca tus datos) ---
+  db-test:
+    profiles: [test]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: sanl_test
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck: *db-healthcheck
+
+  tests:
+    profiles: [test]
+    build:
+      context: ./backend
+      args:
+        INSTALL_DEV: "true"
+    environment:
+      DATABASE_URL: postgresql://postgres:test@db-test:5432/sanl_test
+      JWT_SECRET: secreto-solo-para-pruebas-0123456789abcdef
+    depends_on:
+      db-test:
+        condition: service_healthy
+    command: ["pytest", "-q", "-p", "no:cacheprovider"]
+
+volumes:
+  pgdata:
